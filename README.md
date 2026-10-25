@@ -10,6 +10,7 @@ An open-source starter for generating faceless videos from a script. Built with 
 - Downloadable MP4 and SRT files
 - Responsive web interface
 - Docker/Railway-ready deployment
+- Optional GitHub Actions deployment to Railway whenever code is pushed to `main`
 
 This MVP creates designed scene cards from your script. It does not generate photorealistic AI footage by itself. For AI video clips or licensed stock footage, connect a video-generation/stock provider and configure its API key.
 
@@ -24,10 +25,25 @@ Requirements: Python 3.11+, FFmpeg installed and available on PATH.
 
 Open http://127.0.0.1:8000.
 
-## Deploy to Railway
-1. Create a Railway project from this GitHub repository.
+## Deploy to Railway manually
+1. Create a Railway project and service from this GitHub repository.
 2. Railway detects the Dockerfile and builds the app.
-3. Deploy. The app binds to Railway's PORT environment variable.
-4. FFmpeg is included in the container.
+3. Deploy and generate a public domain for the service.
+4. The app binds to Railway's `PORT` environment variable. FFmpeg is included in the container.
 
-Generated videos are stored in outputs/ and may be cleared on ephemeral hosting restarts. Edge TTS requires an internet connection. Review usage rights before publishing any content.
+## Automatic deployment using GitHub Actions
+The workflow `.github/workflows/deploy-railway.yml` deploys to Railway on every push to `main` and can also be started manually from the GitHub Actions tab.
+
+Configure these in GitHub repository **Settings → Secrets and variables → Actions**:
+
+**Repository secret**
+- `RAILWAY_TOKEN`: a Railway **project token** for the target environment. Keep this secret; do not commit it into the repository.
+
+**Repository variables**
+- `RAILWAY_PROJECT_ID`: the Railway project ID.
+- `RAILWAY_ENVIRONMENT`: the target environment name or ID (usually `production`).
+- `RAILWAY_SERVICE`: optional; set the exact Railway service name or ID if the project has multiple services. Leave unset for a single-service project.
+
+Once those values are saved, push a commit to `main` or run the workflow manually from **Actions → Deploy to Railway → Run workflow**. Check the workflow run logs if the deployment fails.
+
+Generated videos are stored in `outputs/` and may be cleared on ephemeral hosting restarts. Edge TTS requires an internet connection. Review usage rights before publishing any content.
