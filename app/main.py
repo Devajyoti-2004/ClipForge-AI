@@ -126,9 +126,41 @@ async def build_video(job: str, req: RenderRequest):
     folder.mkdir(parents=True, exist_ok=True)
     audio, srt, mp4 = folder / "narration.mp3", folder / "captions.srt", folder / "clipforge-video.mp4"
     state = JOBS[job]
-    state.update({"status": "running", "stage": "Generating narration", "progress": 5, "total_scenes": len(scenes), "current_scene": 0})
+    state.update({"status": "running", "stage": "Preparing narration", "progress": 2, "total_scenes": len(scenes), "current_scene": 0})
     voice = req.voice if re.fullmatch(r"[a-z]{2,3}-[A-Z]{2,4}-[A-Za-z0-9]+Neural", req.voice or "") else DEFAULT_VOICE
-    await edge_tts.Communicate(req.script, voice).save(str(audio))
+
+    # Edge TTS can appear frozen while processing one very long request.
+    # Synthesize manageable chunks and report progress after each chunk.
+    words = req.script.split()
+    narration_chunks, buffer = [], ""
+    for word in words:
+        if buffer and len(buffer) + len(word) + 1 > 1400:
+            narration_chunks.append(buffer)
+            buffer = word
+        else:
+            buffer = f"{buffer} {word}".strip()
+    if buffer:
+        narration_chunks.append(buffer)
+    audio_parts = []
+    for i, chunk in enumerate(narration_chunks, 1):
+        part = folder / f"narration-part-{i:03d}.mp3"
+        state.update({
+            "stage": f"Generating narration part {i} of {len(narration_chunks)}",
+            "progress": min(14, 2 + int(12 * i / len(narration_chunks))),
+            "current_scene": 0,
+            "scene_caption": f"Voice generation is progressing: part {i} of {len(narration_chunks)}."
+        })
+        await edge_tts.Communicate(chunk, voice).save(str(part))
+        audio_parts.append(part)
+    if len(audio_parts) == 1:
+        shutil.copyfile(audio_parts[0], audio)
+    else:
+        audio_concat = folder / "audio-concat.txt"
+        with audio_concat.open("w", encoding="utf-8") as f:
+            for part in audio_parts:
+                f.write(f"file '{part.as_posix()}'\\n")
+        await asyncio.to_thread(run_cmd, [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(audio_concat), "-c", "copy", str(audio)])
+    state.update({"stage": "Narration ready — preparing scene cards", "progress": 15})
     result = await asyncio.to_thread(subprocess.run, [probe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(audio)], capture_output=True, text=True)
     if result.returncode or not result.stdout.strip():
         raise RuntimeError("Could not determine narration duration.")
