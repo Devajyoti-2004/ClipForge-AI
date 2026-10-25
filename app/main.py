@@ -18,7 +18,7 @@ STATIC = ROOT / "static"
 OUTPUTS = ROOT / "outputs"
 OUTPUTS.mkdir(exist_ok=True)
 STATIC.mkdir(exist_ok=True)
-app = FastAPI(title="ClipForge AI", version="0.2.0")
+app = FastAPI(title="ClipForge AI", version="0.3.0")
 JOBS = {}
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
@@ -26,7 +26,7 @@ DEFAULT_VOICE = "en-IN-NeerjaNeural"
 
 class RenderRequest(BaseModel):
     title: str = Field(default="My ClipForge Video", max_length=100)
-    script: str = Field(min_length=20, max_length=12000)
+    script: str = Field(min_length=20, max_length=50000)
     voice: str = "en-IN-NeerjaNeural"
     format: str = "9:16"
     quality: str = "1080p"
@@ -43,7 +43,7 @@ def split_scenes(script: str):
             current = f"{current} {part}".strip()
     if current:
         scenes.append(current)
-    return scenes[:40]
+    return scenes
 
 def font(size, bold=False):
     candidates = [
@@ -80,7 +80,7 @@ def make_card(path: Path, title: str, caption: str, index: int, total: int, dime
         f = font(size, True)
     line_h = int(size * 1.35)
     y = int(h*.36)
-    for line in wrapped[:7]:
+    for line in wrapped:
         draw.text((int(w*.12), y), line, font=f, fill=(255,255,255,255), stroke_width=1, stroke_fill=(10,10,30,180))
         y += line_h
     draw.text((int(w*.12), int(h*.78)), title[:70], font=font(max(16,int(w*.023))), fill=(210,218,245,255))
