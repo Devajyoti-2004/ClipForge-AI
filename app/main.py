@@ -1,4 +1,9 @@
 import asyncio
+import base64
+import json
+import os
+import urllib.error
+import urllib.request
 import re
 import shutil
 import subprocess
@@ -30,6 +35,7 @@ class RenderRequest(BaseModel):
     voice: str = "en-IN-NeerjaNeural"
     format: str = "9:16"
     quality: str = "1080p"
+    visual_mode: str = "cards"
 
 def split_scenes(script: str):
     # Keep every word from the script in the storyboard; split very long sentences
@@ -59,6 +65,134 @@ def split_scenes(script: str):
     if current:
         scenes.append(current)
     return scenes
+
+
+def split_video_scenes(script: str, max_chars: int = 650):
+    paragraphs = [p.strip() for p in re.split(r"\n+", script.strip()) if p.strip()]
+    sentences = []
+    for paragraph in paragraphs:
+        sentences.extend([s.strip() for s in re.split(r"(?<=[.!?])\s+", paragraph) if s.strip()])
+    scenes, current = [], ""
+    for sentence in sentences:
+        while len(sentence) > max_chars:
+            cut = sentence.rfind(" ", 0, max_chars)
+            if cut < 1:
+                cut = max_chars
+            piece, sentence = sentence[:cut].strip(), sentence[cut:].strip()
+            if current:
+                scenes.append(current)
+                current = ""
+            scenes.append(piece)
+        if current and len(current) + len(sentence) + 1 > max_chars:
+            scenes.append(current)
+            current = sentence
+        else:
+            current = (current + " " + sentence).strip()
+    if current:
+        scenes.append(current)
+    return scenes or [script.strip()]
+
+
+def _gemini_video_request(prompt: str, aspect_ratio: str, output_path: Path):
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError("Gemini AI scenes require GEMINI_API_KEY. Add it in Render → your service → Environment, then redeploy.")
+    payload = {
+        "model": "gemini-omni-1.1-flash",
+        "input": prompt,
+        "response_format": {"type": "video", "aspect_ratio": aspect_ratio, "resolution": "720p", "delivery": "uri"}
+    }
+    request = urllib.request.Request(
+        "https://generativelanguage.googleapis.com/v1beta/interactions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=600) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1200]
+        raise RuntimeError(f"Gemini API returned HTTP {exc.code}: {detail}")
+    except Exception as exc:
+        raise RuntimeError(f"Gemini video request failed: {str(exc)[:500]}")
+    video = None
+    for step in data.get("steps", []):
+        for item in step.get("content", []):
+            if item.get("type") == "video":
+                video = item
+    if not video:
+        raise RuntimeError("Gemini returned no video output. Try again or check API access and quota.")
+    if video.get("data"):
+        output_path.write_bytes(base64.b64decode(video["data"]))
+    elif video.get("uri"):
+        uri = video["uri"]
+        download_request = urllib.request.Request(uri, headers={"x-goog-api-key": api_key})
+        try:
+            with urllib.request.urlopen(download_request, timeout=600) as response:
+                output_path.write_bytes(response.read())
+        except Exception as exc:
+            raise RuntimeError(f"Could not download generated video: {str(exc)[:500]}")
+    else:
+        raise RuntimeError("Gemini video response did not include downloadable video data.")
+    if not output_path.exists() or output_path.stat().st_size < 1024:
+        raise RuntimeError("Gemini returned an empty or invalid video file.")
+
+
+async def generate_gemini_video(job: str, req: RenderRequest, scenes, folder: Path, mp4: Path, audio: Path, ffmpeg: str, dims):
+    state = JOBS[job]
+    aspect = "9:16" if req.format == "9:16" else "16:9"
+    clip_paths = []
+    character_bible = "Create a polished family-friendly 3D animated cartoon movie. Keep character designs, clothing, colors, proportions, and art direction consistent across scenes. No subtitles, no on-screen text, no logos. Cinematic composition, expressive acting, smooth natural motion."
+    for i, scene in enumerate(scenes, 1):
+        clip = folder / f"gemini-scene-{i:03d}.mp4"
+        prompt = (
+            f"Movie title: {req.title}. Scene {i} of {len(scenes)}. {character_bible} "
+            f"Visualize this story beat as a complete short animated shot with clear action, a beginning and ending, and camera movement. "
+            f"Story excerpt: {scene}"
+        )
+        state.update({
+            "stage": f"Generating Gemini AI scene {i} of {len(scenes)} (attempt 1/2)",
+            "progress": min(72, 15 + int(55 * (i - 1) / max(1, len(scenes)))),
+            "current_scene": i,
+            "scene_caption": scene[:240],
+        })
+        last_error = None
+        for attempt in range(1, 3):
+            try:
+                if attempt > 1:
+                    state.update({"stage": f"Retrying Gemini AI scene {i} of {len(scenes)} (attempt 2/2)"})
+                await asyncio.to_thread(_gemini_video_request, prompt, aspect, clip)
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+        if last_error:
+            raise RuntimeError(f"Scene {i} failed after 2 attempts: {last_error}")
+        clip_paths.append(clip)
+        # Extract a representative frame for the live preview.
+        preview = folder / f"scene-{i:03d}.png"
+        try:
+            await asyncio.to_thread(run_cmd, [ffmpeg, "-y", "-sseof", "-0.5", "-i", str(clip), "-frames:v", "1", str(preview)])
+            state.update({"preview_url": f"/api/jobs/{job}/preview/{i}"})
+        except Exception:
+            pass
+        state.update({"progress": min(75, 15 + int(60 * i / max(1, len(scenes))))})
+    state.update({"stage": "Assembling Gemini clips into final MP4", "progress": 82})
+    concat = folder / "gemini-concat.txt"
+    with concat.open("w", encoding="utf-8") as handle:
+        for clip in clip_paths:
+            safe_path = clip.as_posix().replace("'", "'\\''")
+            handle.write(f"file '{safe_path}'\n")
+    # Re-encode the joined clips so codec/timebase differences do not break the final file.
+    joined = folder / "joined-gemini.mp4"
+    await asyncio.to_thread(run_cmd, [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(concat),
+        "-vf", f"scale={dims[0]}:{dims[1]}:force_original_aspect_ratio=decrease,pad={dims[0]}:{dims[1]}:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
+        "-r", "25", "-c:v", "libx264", "-preset", "veryfast", "-an", str(joined)])
+    state.update({"stage": "Mixing narration and final audio", "progress": 91})
+    await asyncio.to_thread(run_cmd, [ffmpeg, "-y", "-i", str(joined), "-i", str(audio),
+        "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+        "-shortest", str(mp4)])
 
 def font(size, bold=False):
     candidates = [
@@ -166,29 +300,35 @@ async def build_video(job: str, req: RenderRequest):
         raise RuntimeError("Could not determine narration duration.")
     duration = max(3.0, float(result.stdout.strip()))
     per_scene = duration / len(scenes)
-    cards = []
-    state.update({"stage": "Designing scene previews", "progress": 15})
-    for i, scene in enumerate(scenes, 1):
-        card = folder / f"scene-{i:03d}.png"
-        await asyncio.to_thread(make_card, card, req.title, scene, i, len(scenes), dims)
-        cards.append(card)
-        state.update({
-            "stage": f"Building scene {i} of {len(scenes)}",
-            "progress": min(70, 15 + int(55 * i / len(scenes))),
-            "current_scene": i,
-            "preview_url": f"/api/jobs/{job}/preview/{i}",
-            "scene_caption": scene[:240],
-        })
-    state.update({"stage": "Assembling MP4 and audio", "progress": 75})
-    concat = folder / "concat.txt"
-    with concat.open("w", encoding="utf-8") as f:
-        for card in cards:
-            f.write(f"file '{card.as_posix()}'\n")
-            f.write(f"duration {per_scene:.4f}\n")
-        f.write(f"file '{cards[-1].as_posix()}'\n")
-    await asyncio.to_thread(run_cmd, [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-i", str(audio),
-             "-vf", "format=yuv420p", "-r", "25", "-c:v", "libx264", "-preset", "veryfast",
-             "-t", f"{duration:.3f}", "-c:a", "aac", "-b:a", "160k", "-shortest", str(mp4)])
+    if req.visual_mode == "gemini":
+        video_scenes = split_video_scenes(req.script)
+        state.update({"total_scenes": len(video_scenes), "stage": "Starting Gemini AI video generation", "progress": 15})
+        await generate_gemini_video(job, req, video_scenes, folder, mp4, audio, ffmpeg, dims)
+        scenes = video_scenes
+    else:
+        cards = []
+        state.update({"stage": "Designing scene previews", "progress": 15})
+        for i, scene in enumerate(scenes, 1):
+            card = folder / f"scene-{i:03d}.png"
+            await asyncio.to_thread(make_card, card, req.title, scene, i, len(scenes), dims)
+            cards.append(card)
+            state.update({
+                "stage": f"Building scene {i} of {len(scenes)}",
+                "progress": min(70, 15 + int(55 * i / len(scenes))),
+                "current_scene": i,
+                "preview_url": f"/api/jobs/{job}/preview/{i}",
+                "scene_caption": scene[:240],
+            })
+        state.update({"stage": "Assembling MP4 and audio", "progress": 75})
+        concat = folder / "concat.txt"
+        with concat.open("w", encoding="utf-8") as f:
+            for card in cards:
+                f.write(f"file '{card.as_posix()}'\\n")
+                f.write(f"duration {per_scene:.4f}\\n")
+            f.write(f"file '{cards[-1].as_posix()}'\\n")
+        await asyncio.to_thread(run_cmd, [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-i", str(audio),
+                 "-vf", "format=yuv420p", "-r", "25", "-c:v", "libx264", "-preset", "veryfast",
+                 "-t", f"{duration:.3f}", "-c:a", "aac", "-b:a", "160k", "-shortest", str(mp4)])
     state.update({"stage": "Creating captions", "progress": 92})
     total_chars = max(1, sum(len(s) for s in scenes))
     elapsed = 0.0
