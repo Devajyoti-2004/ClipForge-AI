@@ -100,7 +100,7 @@ def _gemini_video_request(prompt: str, aspect_ratio: str, output_path: Path):
     payload = {
         "model": "gemini-omni-1.1-flash",
         "input": prompt,
-        "response_format": {"type": "video", "aspect_ratio": aspect_ratio, "resolution": "720p", "delivery": "uri"}
+        "response_format": {"type": "video", "aspect_ratio": aspect_ratio, "resolution": "720p"}
     }
     request = urllib.request.Request(
         "https://generativelanguage.googleapis.com/v1beta/interactions",
