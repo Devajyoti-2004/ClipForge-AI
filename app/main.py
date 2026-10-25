@@ -21,19 +21,14 @@ STATIC.mkdir(exist_ok=True)
 app = FastAPI(title="ClipForge AI", version="0.1.0")
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
-VOICES = {
-    "en-US-AriaNeural": "Aria - US English (female)",
-    "en-US-GuyNeural": "Guy - US English (male)",
-    "en-IN-NeerjaNeural": "Neerja - Indian English (female)",
-    "en-IN-PrabhatNeural": "Prabhat - Indian English (male)",
-    "en-GB-SoniaNeural": "Sonia - British English (female)",
-}
+DEFAULT_VOICE = "en-IN-NeerjaNeural"
 
 class RenderRequest(BaseModel):
     title: str = Field(default="My ClipForge Video", max_length=100)
     script: str = Field(min_length=20, max_length=12000)
     voice: str = "en-IN-NeerjaNeural"
     format: str = "9:16"
+    quality: str = "1080p"
 
 def split_scenes(script: str):
     parts = re.split(r"(?<=[.!?])\s+|\n+", script.strip())
@@ -104,13 +99,19 @@ async def build_video(job: str, req: RenderRequest):
     scenes = split_scenes(req.script)
     if not scenes:
         raise ValueError("Please enter a script with some sentences.")
-    dims = {"9:16": (720,1280), "1:1": (900,900), "16:9": (1280,720)}.get(req.format)
-    if not dims:
+    base_dims = {"9:16": (720,1280), "1:1": (1080,1080), "16:9": (1920,1080)}.get(req.format)
+    if not base_dims:
         raise ValueError("Choose 9:16, 1:1 or 16:9.")
+    scales = {"720p": 2/3, "1080p": 1.0, "4K": 2.0}
+    if req.quality not in scales:
+        raise ValueError("Choose 720p, 1080p or 4K quality.")
+    dims = tuple(max(2, int(v * scales[req.quality] // 2 * 2)) for v in base_dims)
     folder = OUTPUTS / job
     folder.mkdir(parents=True, exist_ok=True)
     audio, srt, mp4 = folder / "narration.mp3", folder / "captions.srt", folder / "clipforge-video.mp4"
-    communicate = edge_tts.Communicate(req.script, req.voice if req.voice in VOICES else "en-IN-NeerjaNeural")
+    # Accept voices discovered from the live Edge TTS catalogue; fall back safely if unavailable.
+    voice = req.voice if re.fullmatch(r"[a-z]{2,3}-[A-Z]{2,4}-[A-Za-z0-9]+Neural", req.voice or "") else DEFAULT_VOICE
+    communicate = edge_tts.Communicate(req.script, voice)
     await communicate.save(str(audio))
     result = subprocess.run([probe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(audio)], capture_output=True, text=True)
     if result.returncode or not result.stdout.strip():
@@ -156,7 +157,12 @@ async def home():
 
 @app.get("/api/voices")
 async def voices():
-    return [{"id": k, "label": v} for k, v in VOICES.items()]
+    """Return all voices currently available from Edge TTS, covering many supported languages."""
+    try:
+        catalogue = await edge_tts.list_voices()
+        return sorted([{"id": v["ShortName"], "label": f'{v.get("FriendlyName", v["ShortName"])} · {v.get("Locale", "Unknown locale")} · {v.get("Gender", "Voice")}' , "locale": v.get("Locale", "und")} for v in catalogue], key=lambda v: (v["locale"], v["label"]))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Could not load voice catalogue: {str(exc)[:200]}")
 
 @app.post("/api/generate")
 async def generate(req: RenderRequest):
@@ -166,7 +172,7 @@ async def generate(req: RenderRequest):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)[:1000])
     return {"job_id": job, "title": req.title, "duration_seconds": round(duration, 1),
-            "scene_count": count, "video_url": f"/api/download/{job}/video",
+            "scene_count": count, "quality": req.quality, "video_url": f"/api/download/{job}/video",
             "captions_url": f"/api/download/{job}/captions"}
 
 @app.get("/api/download/{job_id}/{kind}")
