@@ -32,11 +32,26 @@ class RenderRequest(BaseModel):
     quality: str = "1080p"
 
 def split_scenes(script: str):
-    parts = re.split(r"(?<=[.!?])\s+|\n+", script.strip())
+    # Keep every word from the script in the storyboard; split very long sentences
+    # into readable cards instead of truncating the story after a fixed scene count.
+    parts = re.split(r"(?<=[.!?])\\s+|\\n+", script.strip())
     parts = [p.strip() for p in parts if p.strip()]
-    scenes, current = [], ""
+    chunks = []
     for part in parts:
-        if len(current) + len(part) > 180 and current:
+        words = part.split()
+        current = ""
+        for word in words:
+            if len(current) + len(word) + (1 if current else 0) > 180:
+                if current:
+                    chunks.append(current)
+                current = word
+            else:
+                current = f"{current} {word}".strip()
+        if current:
+            chunks.append(current)
+    scenes, current = [], ""
+    for part in chunks:
+        if current and len(current) + len(part) + 1 > 180:
             scenes.append(current)
             current = part
         else:
