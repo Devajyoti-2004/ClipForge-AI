@@ -136,9 +136,9 @@ async def build_video(job: str, req: RenderRequest):
     concat = folder / "concat.txt"
     with concat.open("w", encoding="utf-8") as f:
         for card in cards:
-            f.write(f"file '{card.as_posix()}'\\n")
-            f.write(f"duration {per_scene:.4f}\\n")
-        f.write(f"file '{cards[-1].as_posix()}'\\n")
+            f.write(f"file '{card.as_posix()}'\n")
+            f.write(f"duration {per_scene:.4f}\n")
+        f.write(f"file '{cards[-1].as_posix()}'\n")
     await asyncio.to_thread(run_cmd, [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-i", str(audio),
              "-vf", "format=yuv420p", "-r", "25", "-c:v", "libx264", "-preset", "veryfast",
              "-t", f"{duration:.3f}", "-c:a", "aac", "-b:a", "160k", "-shortest", str(mp4)])
@@ -155,7 +155,7 @@ async def build_video(job: str, req: RenderRequest):
         for i, scene in enumerate(scenes, 1):
             span = duration * len(scene) / total_chars
             start, end = elapsed, min(duration, elapsed + span)
-            f.write(f"{i}\\n{stamp(start)} --> {stamp(end)}\\n{scene}\\n\\n")
+            f.write(f"{i}\n{stamp(start)} --> {stamp(end)}\n{scene}\n\n")
             elapsed = end
     return mp4, srt, duration, len(scenes)
 
