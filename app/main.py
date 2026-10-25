@@ -99,7 +99,7 @@ async def build_video(job: str, req: RenderRequest):
     scenes = split_scenes(req.script)
     if not scenes:
         raise ValueError("Please enter a script with some sentences.")
-    base_dims = {"9:16": (720,1280), "1:1": (1080,1080), "16:9": (1920,1080)}.get(req.format)
+    base_dims = {"9:16": (1080,1920), "1:1": (1080,1080), "16:9": (1920,1080)}.get(req.format)
     if not base_dims:
         raise ValueError("Choose 9:16, 1:1 or 16:9.")
     scales = {"720p": 2/3, "1080p": 1.0, "4K": 2.0}
