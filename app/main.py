@@ -18,7 +18,8 @@ STATIC = ROOT / "static"
 OUTPUTS = ROOT / "outputs"
 OUTPUTS.mkdir(exist_ok=True)
 STATIC.mkdir(exist_ok=True)
-app = FastAPI(title="ClipForge AI", version="0.1.0")
+app = FastAPI(title="ClipForge AI", version="0.2.0")
+JOBS = {}
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 DEFAULT_VOICE = "en-IN-NeerjaNeural"
@@ -109,29 +110,39 @@ async def build_video(job: str, req: RenderRequest):
     folder = OUTPUTS / job
     folder.mkdir(parents=True, exist_ok=True)
     audio, srt, mp4 = folder / "narration.mp3", folder / "captions.srt", folder / "clipforge-video.mp4"
-    # Accept voices discovered from the live Edge TTS catalogue; fall back safely if unavailable.
+    state = JOBS[job]
+    state.update({"status": "running", "stage": "Generating narration", "progress": 5, "total_scenes": len(scenes), "current_scene": 0})
     voice = req.voice if re.fullmatch(r"[a-z]{2,3}-[A-Z]{2,4}-[A-Za-z0-9]+Neural", req.voice or "") else DEFAULT_VOICE
-    communicate = edge_tts.Communicate(req.script, voice)
-    await communicate.save(str(audio))
-    result = subprocess.run([probe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(audio)], capture_output=True, text=True)
+    await edge_tts.Communicate(req.script, voice).save(str(audio))
+    result = await asyncio.to_thread(subprocess.run, [probe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(audio)], capture_output=True, text=True)
     if result.returncode or not result.stdout.strip():
         raise RuntimeError("Could not determine narration duration.")
     duration = max(3.0, float(result.stdout.strip()))
     per_scene = duration / len(scenes)
     cards = []
+    state.update({"stage": "Designing scene previews", "progress": 15})
     for i, scene in enumerate(scenes, 1):
         card = folder / f"scene-{i:03d}.png"
-        make_card(card, req.title, scene, i, len(scenes), dims)
+        await asyncio.to_thread(make_card, card, req.title, scene, i, len(scenes), dims)
         cards.append(card)
+        state.update({
+            "stage": f"Building scene {i} of {len(scenes)}",
+            "progress": min(70, 15 + int(55 * i / len(scenes))),
+            "current_scene": i,
+            "preview_url": f"/api/jobs/{job}/preview/{i}",
+            "scene_caption": scene[:240],
+        })
+    state.update({"stage": "Assembling MP4 and audio", "progress": 75})
     concat = folder / "concat.txt"
     with concat.open("w", encoding="utf-8") as f:
         for card in cards:
-            f.write(f"file '{card.as_posix()}'\n")
-            f.write(f"duration {per_scene:.4f}\n")
-        f.write(f"file '{cards[-1].as_posix()}'\n")
-    run_cmd([ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-i", str(audio),
+            f.write(f"file '{card.as_posix()}'\\n")
+            f.write(f"duration {per_scene:.4f}\\n")
+        f.write(f"file '{cards[-1].as_posix()}'\\n")
+    await asyncio.to_thread(run_cmd, [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-i", str(audio),
              "-vf", "format=yuv420p", "-r", "25", "-c:v", "libx264", "-preset", "veryfast",
              "-t", f"{duration:.3f}", "-c:a", "aac", "-b:a", "160k", "-shortest", str(mp4)])
+    state.update({"stage": "Creating captions", "progress": 92})
     total_chars = max(1, sum(len(s) for s in scenes))
     elapsed = 0.0
     def stamp(sec):
@@ -144,9 +155,21 @@ async def build_video(job: str, req: RenderRequest):
         for i, scene in enumerate(scenes, 1):
             span = duration * len(scene) / total_chars
             start, end = elapsed, min(duration, elapsed + span)
-            f.write(f"{i}\n{stamp(start)} --> {stamp(end)}\n{scene}\n\n")
+            f.write(f"{i}\\n{stamp(start)} --> {stamp(end)}\\n{scene}\\n\\n")
             elapsed = end
     return mp4, srt, duration, len(scenes)
+
+async def run_generation(job: str, req: RenderRequest):
+    try:
+        mp4, srt, duration, count = await build_video(job, req)
+        JOBS[job].update({
+            "status": "completed", "stage": "Video ready", "progress": 100,
+            "duration_seconds": round(duration, 1), "scene_count": count,
+            "quality": req.quality, "video_url": f"/api/download/{job}/video",
+            "captions_url": f"/api/download/{job}/captions",
+        })
+    except Exception as exc:
+        JOBS[job].update({"status": "failed", "stage": "Generation failed", "error": str(exc)[:1000]})
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
@@ -167,13 +190,25 @@ async def voices():
 @app.post("/api/generate")
 async def generate(req: RenderRequest):
     job = uuid.uuid4().hex[:12]
-    try:
-        mp4, srt, duration, count = await build_video(job, req)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)[:1000])
-    return {"job_id": job, "title": req.title, "duration_seconds": round(duration, 1),
-            "scene_count": count, "quality": req.quality, "video_url": f"/api/download/{job}/video",
-            "captions_url": f"/api/download/{job}/captions"}
+    JOBS[job] = {"job_id": job, "status": "queued", "stage": "Queued", "progress": 0,
+                 "current_scene": 0, "total_scenes": 0, "preview_url": None, "scene_caption": ""}
+    asyncio.create_task(run_generation(job, req))
+    return {"job_id": job, "status_url": f"/api/jobs/{job}"}
+
+@app.get("/api/jobs/{job_id}")
+async def job_status(job_id: str):
+    if not re.fullmatch(r"[a-f0-9]{12}", job_id) or job_id not in JOBS:
+        raise HTTPException(status_code=404, detail="Job not found. Jobs are kept in memory while this server process is running.")
+    return JOBS[job_id]
+
+@app.get("/api/jobs/{job_id}/preview/{scene_index}")
+async def scene_preview(job_id: str, scene_index: int):
+    if not re.fullmatch(r"[a-f0-9]{12}", job_id) or job_id not in JOBS or scene_index < 1:
+        raise HTTPException(status_code=404, detail="Preview not found")
+    target = OUTPUTS / job_id / f"scene-{scene_index:03d}.png"
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Scene preview is not ready yet")
+    return FileResponse(target, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 @app.get("/api/download/{job_id}/{kind}")
 async def download(job_id: str, kind: str):
