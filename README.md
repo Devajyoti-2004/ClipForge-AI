@@ -6,13 +6,15 @@ An open-source starter for generating faceless videos from a script. Built with 
 - Script-to-video slideshow with automatically split scenes
 - Text-to-speech narration
 - Vertical 9:16, square 1:1 and landscape 16:9 exports
+- Selectable 720p, 1080p and 4K render resolutions (4K is resource-intensive)
+- Dynamic voice list from the Edge TTS catalogue, covering many supported languages and locales
 - Automatic SRT captions
 - Downloadable MP4 and SRT files
 - Responsive web interface
 - Docker/Railway-ready deployment
 - Optional GitHub Actions deployment to Railway whenever code is pushed to `main`
 
-This MVP creates designed scene cards from your script. It does not generate photorealistic AI footage by itself. For AI video clips or licensed stock footage, connect a video-generation/stock provider and configure its API key.
+This MVP follows the user-provided script and creates designed scene cards plus narration; it does not invent a script or generate photorealistic AI footage by itself. For cinematic AI video clips or licensed stock footage, connect a video-generation/stock provider and configure its API key. The voice list covers languages exposed by Edge TTS, not every language spoken worldwide. The app does not impose a per-video credit counter, but hosting, storage, provider, and compute limits still apply; “unlimited” processing cannot be guaranteed on a free host. 4K and long-video rendering can exceed free-host memory, CPU, or request limits.
 
 ## Run locally
 Requirements: Python 3.11+, FFmpeg installed and available on PATH.
