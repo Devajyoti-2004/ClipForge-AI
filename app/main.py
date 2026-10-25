@@ -1,0 +1,180 @@
+import asyncio
+import re
+import shutil
+import subprocess
+import textwrap
+import uuid
+from pathlib import Path
+
+import edge_tts
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+from PIL import Image, ImageDraw, ImageFont
+
+ROOT = Path(__file__).resolve().parent.parent
+STATIC = ROOT / "static"
+OUTPUTS = ROOT / "outputs"
+OUTPUTS.mkdir(exist_ok=True)
+STATIC.mkdir(exist_ok=True)
+app = FastAPI(title="ClipForge AI", version="0.1.0")
+app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+
+VOICES = {
+    "en-US-AriaNeural": "Aria - US English (female)",
+    "en-US-GuyNeural": "Guy - US English (male)",
+    "en-IN-NeerjaNeural": "Neerja - Indian English (female)",
+    "en-IN-PrabhatNeural": "Prabhat - Indian English (male)",
+    "en-GB-SoniaNeural": "Sonia - British English (female)",
+}
+
+class RenderRequest(BaseModel):
+    title: str = Field(default="My ClipForge Video", max_length=100)
+    script: str = Field(min_length=20, max_length=12000)
+    voice: str = "en-IN-NeerjaNeural"
+    format: str = "9:16"
+
+def split_scenes(script: str):
+    parts = re.split(r"(?<=[.!?])\s+|\n+", script.strip())
+    parts = [p.strip() for p in parts if p.strip()]
+    scenes, current = [], ""
+    for part in parts:
+        if len(current) + len(part) > 180 and current:
+            scenes.append(current)
+            current = part
+        else:
+            current = f"{current} {part}".strip()
+    if current:
+        scenes.append(current)
+    return scenes[:40]
+
+def font(size, bold=False):
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
+    ]
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            pass
+    return ImageFont.load_default()
+
+def make_card(path: Path, title: str, caption: str, index: int, total: int, dimensions):
+    w, h = dimensions
+    image = Image.new("RGB", (w, h), (12, 18, 38))
+    pixels = image.load()
+    for y in range(h):
+        for x in range(0, w, 4):
+            t = (x / max(1, w) + y / max(1, h)) / 2
+            c = (int(18 + 35*t), int(25 + 12*t), int(58 + 95*t))
+            for xx in range(x, min(x+4, w)):
+                pixels[xx, y] = c
+    draw = ImageDraw.Draw(image, "RGBA")
+    draw.ellipse((int(w*.58), int(h*.08), int(w*1.05), int(h*.40)), fill=(118, 83, 255, 55))
+    draw.rounded_rectangle((int(w*.08), int(h*.12), int(w*.92), int(h*.88)), radius=28, outline=(255,255,255,45), width=2)
+    draw.text((int(w*.12), int(h*.17)), "CLIPFORGE / AI STORY", font=font(max(18, int(w*.025)), True), fill=(180, 190, 255, 255))
+    max_chars = 22 if h > w else 34
+    wrapped = textwrap.wrap(caption, width=max_chars)
+    size = max(26, int(w*.052))
+    f = font(size, True)
+    while size > 20 and len(wrapped) * (size * 1.35) > h*.38:
+        size -= 2
+        f = font(size, True)
+    line_h = int(size * 1.35)
+    y = int(h*.36)
+    for line in wrapped[:7]:
+        draw.text((int(w*.12), y), line, font=f, fill=(255,255,255,255), stroke_width=1, stroke_fill=(10,10,30,180))
+        y += line_h
+    draw.text((int(w*.12), int(h*.78)), title[:70], font=font(max(16,int(w*.023))), fill=(210,218,245,255))
+    draw.text((int(w*.12), int(h*.83)), f"SCENE {index:02d} / {total:02d}", font=font(max(14,int(w*.018)), True), fill=(170,180,220,255))
+    image.save(path, quality=92)
+
+def run_cmd(args):
+    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode:
+        raise RuntimeError(result.stderr[-1800:] or "Media processing failed")
+
+async def build_video(job: str, req: RenderRequest):
+    ffmpeg = shutil.which("ffmpeg")
+    probe = shutil.which("ffprobe")
+    if not ffmpeg or not probe:
+        raise RuntimeError("FFmpeg and FFprobe are required. Use the provided Dockerfile.")
+    scenes = split_scenes(req.script)
+    if not scenes:
+        raise ValueError("Please enter a script with some sentences.")
+    dims = {"9:16": (720,1280), "1:1": (900,900), "16:9": (1280,720)}.get(req.format)
+    if not dims:
+        raise ValueError("Choose 9:16, 1:1 or 16:9.")
+    folder = OUTPUTS / job
+    folder.mkdir(parents=True, exist_ok=True)
+    audio, srt, mp4 = folder / "narration.mp3", folder / "captions.srt", folder / "clipforge-video.mp4"
+    communicate = edge_tts.Communicate(req.script, req.voice if req.voice in VOICES else "en-IN-NeerjaNeural")
+    await communicate.save(str(audio))
+    result = subprocess.run([probe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(audio)], capture_output=True, text=True)
+    if result.returncode or not result.stdout.strip():
+        raise RuntimeError("Could not determine narration duration.")
+    duration = max(3.0, float(result.stdout.strip()))
+    per_scene = duration / len(scenes)
+    cards = []
+    for i, scene in enumerate(scenes, 1):
+        card = folder / f"scene-{i:03d}.png"
+        make_card(card, req.title, scene, i, len(scenes), dims)
+        cards.append(card)
+    concat = folder / "concat.txt"
+    with concat.open("w", encoding="utf-8") as f:
+        for card in cards:
+            f.write(f"file '{card.as_posix()}'\n")
+            f.write(f"duration {per_scene:.4f}\n")
+        f.write(f"file '{cards[-1].as_posix()}'\n")
+    run_cmd([ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-i", str(audio),
+             "-vf", "format=yuv420p", "-r", "25", "-c:v", "libx264", "-preset", "veryfast",
+             "-t", f"{duration:.3f}", "-c:a", "aac", "-b:a", "160k", "-shortest", str(mp4)])
+    total_chars = max(1, sum(len(s) for s in scenes))
+    elapsed = 0.0
+    def stamp(sec):
+        ms = int(sec * 1000)
+        hh, ms = divmod(ms, 3600000)
+        mm, ms = divmod(ms, 60000)
+        ss, ms = divmod(ms, 1000)
+        return f"{hh:02}:{mm:02}:{ss:02},{ms:03}"
+    with srt.open("w", encoding="utf-8") as f:
+        for i, scene in enumerate(scenes, 1):
+            span = duration * len(scene) / total_chars
+            start, end = elapsed, min(duration, elapsed + span)
+            f.write(f"{i}\n{stamp(start)} --> {stamp(end)}\n{scene}\n\n")
+            elapsed = end
+    return mp4, srt, duration, len(scenes)
+
+@app.get("/", response_class=HTMLResponse)
+async def home():
+    index = STATIC / "index.html"
+    if not index.exists():
+        return HTMLResponse("<h1>ClipForge AI</h1><p>Frontend is being set up.</p>")
+    return HTMLResponse(index.read_text(encoding="utf-8"))
+
+@app.get("/api/voices")
+async def voices():
+    return [{"id": k, "label": v} for k, v in VOICES.items()]
+
+@app.post("/api/generate")
+async def generate(req: RenderRequest):
+    job = uuid.uuid4().hex[:12]
+    try:
+        mp4, srt, duration, count = await build_video(job, req)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)[:1000])
+    return {"job_id": job, "title": req.title, "duration_seconds": round(duration, 1),
+            "scene_count": count, "video_url": f"/api/download/{job}/video",
+            "captions_url": f"/api/download/{job}/captions"}
+
+@app.get("/api/download/{job_id}/{kind}")
+async def download(job_id: str, kind: str):
+    if not re.fullmatch(r"[a-f0-9]{12}", job_id):
+        raise HTTPException(status_code=404, detail="File not found")
+    folder = OUTPUTS / job_id
+    target = folder / ("clipforge-video.mp4" if kind == "video" else "captions.srt" if kind == "captions" else "missing")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(target, filename=target.name)
