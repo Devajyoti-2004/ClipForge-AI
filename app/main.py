@@ -158,7 +158,7 @@ async def build_video(job: str, req: RenderRequest):
         audio_concat = folder / "audio-concat.txt"
         with audio_concat.open("w", encoding="utf-8") as f:
             for part in audio_parts:
-                f.write(f"file '{part.as_posix()}'\\n")
+                f.write(f"file '{part.as_posix()}'\n")
         await asyncio.to_thread(run_cmd, [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(audio_concat), "-c", "copy", str(audio)])
     state.update({"stage": "Narration ready — preparing scene cards", "progress": 15})
     result = await asyncio.to_thread(subprocess.run, [probe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(audio)], capture_output=True, text=True)
