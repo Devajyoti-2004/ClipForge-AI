@@ -16,6 +16,24 @@ An open-source starter for generating faceless videos from a script. Built with 
 
 This MVP follows the user-provided script and creates designed scene cards plus narration; it does not invent a script or generate photorealistic AI footage by itself. For cinematic AI video clips or licensed stock footage, connect a video-generation/stock provider and configure its API key. The voice list covers languages exposed by Edge TTS, not every language spoken worldwide. The app does not impose a per-video credit counter, but hosting, storage, provider, and compute limits still apply; “unlimited” processing cannot be guaranteed on a free host. 4K and long-video rendering can exceed free-host memory, CPU, or request limits.
 
+## Gemini AI cinematic scene mode
+
+The web app has two visual modes:
+- **Fast scene cards**: the original local slideshow renderer.
+- **Gemini AI animated scenes**: sends each script excerpt to Google's Gemini Omni Flash video-generation model and assembles the generated MP4 clips with the narration. The app shows per-scene progress, retries a failed scene once, and exposes a frame preview when available.
+
+### Configure the Gemini API key on Render
+
+1. Create or copy an API key at [Google AI Studio API keys](https://aistudio.google.com/api-keys).
+2. Open the Render dashboard and select the ClipForge AI web service.
+3. Open **Environment** and add a variable named `GEMINI_API_KEY`; paste the key as its value.
+4. Save the changes and redeploy the service.
+5. Open ClipForge AI, choose **Gemini AI animated scenes**, then generate a short test script first.
+
+Never commit the API key to GitHub, include it in frontend JavaScript, or share it in screenshots or public logs. If a key is exposed, revoke it and create another. The key is read only by the backend from the environment.
+
+Gemini video generation consumes provider quota and may incur charges depending on the account and current Google terms. Use short test scripts first. Each scene is a separate generation request, and retries can also consume quota. Character descriptions are repeated between scenes to encourage visual continuity, but identical character appearance is not guaranteed. This mode currently generates video clips from text prompts; it does not yet create uploaded character-reference sheets or use the previous scene's final frame as a reference. Generated files are stored on the service filesystem and may disappear after an ephemeral-host restart.
+
 ## Run locally
 Requirements: Python 3.11+, FFmpeg installed and available on PATH.
 
